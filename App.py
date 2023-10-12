@@ -1,46 +1,54 @@
 import streamlit as st
-from PIL import Image
-import tensorflow as tf
-import tensorflow_hub as hub
+import cv2
 
-# Carregando o modelo pré-treinado
-model_path = "models\magenta_arbitrary-image-stylization-v1-256_2"
-model = hub.load(model_path)
+from utils import DataLoader
+from style_transfer import apply_style_transfer
 
-# Função para realizar a transferência de estilo
-# Função para realizar a transferência de estilo
-#@st.cache_resource
-def style_transfer(_content_image, _style_image):
-    # Redimensionar as imagens para o tamanho esperado pelo modelo (256x256)
-    size = 256
-    content_image = _content_image.resize((size, size))
-    style_image = _style_image.resize((size, size))
 
-    content_image = tf.image.convert_image_dtype(tf.convert_to_tensor(content_image), tf.float32)
-    style_image = tf.image.convert_image_dtype(tf.convert_to_tensor(style_image), tf.float32)
+loader = DataLoader(models_dir='models', images_dir='images')
 
-    # Expandir dimensão para criar um lote com tamanho 1
-    content_image = tf.expand_dims(content_image, axis=0)
-    style_image = tf.expand_dims(style_image, axis=0)
+st.markdown("""
+<style>
+    [data-testid=stSidebar] {
+        background-color: #86895D;
+    }
+</style>
+""", unsafe_allow_html=True)
 
-    stylized_image = model(content_image, style_image)[0]
-    return stylized_image.numpy()
+st.title("Neural Style Transfer")
 
-# Título do aplicativo
-st.title("Style Transfer App")
 
-# Upload das imagens de conteúdo e estilo
-content_image = st.file_uploader("Carregue a imagem de conteúdo", type=["jpg", "jpeg", "png"])
-style_image = st.file_uploader("Carregue a imagem de estilo", type=["jpg", "jpeg", "png"])
+st.sidebar.title("Settings")
+st.sidebar.header("Model")
+method = st.sidebar.radio('Select an option', options=['Specific', 'Arbitrary'])
 
-if content_image is not None and style_image is not None:
-    # Carregando as imagens
-    content_image = Image.open(content_image)
-    style_image = Image.open(style_image)
+if method == 'Specific':
+    style_model_name = st.sidebar.selectbox("Choose the style model: ", loader.formated_names(loader.models))
+else:
+    style_model_name = 'magenta_arbitrary-image-stylization-v1-256_2'
 
-    # Realizando a transferência de estilo
-    stylized_result = style_transfer(content_image, style_image)
+style_model = loader.get_model_from_name(style_model_name)
 
-    # Exibindo a imagem resultante
-    st.subheader("Imagem Resultante:")
-    st.image(stylized_result, use_column_width=True, channels="RGB")
+if st.sidebar.checkbox('Upload'):
+    content_file = st.sidebar.file_uploader("Upload a Content Image", type=["png", "jpg", "jpeg"])
+
+    if content_file is not None:
+        content = loader.get_image_from_file(content_file)
+    else:
+        st.warning("Upload an image")
+        st.stop()
+
+else:
+    content_name = st.sidebar.selectbox("Choose a Content Image", loader.formated_names(loader.images))
+    content = loader.get_image_from_name(content_name)
+
+WIDTH = st.sidebar.select_slider('RESIZE', list(range(150, 501, 50)), value=300)
+st.sidebar.image(content, width=300, channels='RGB')
+
+content = cv2.resize(content, (WIDTH, WIDTH))
+
+# apply style transfer
+#result = apply_style_transfer(content, style_model)
+
+#show result
+#st.image(result, channels='RGB', clamp=True)
