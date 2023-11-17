@@ -1,11 +1,13 @@
 import streamlit as st
 import cv2
+import torch
+import tensorflow_hub as hub
 
-from utils.utils import Utils
-from style_transfer import apply_style_transfer
+import utils
 
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-utils = Utils(models_dir='models', images_dir='images')
+utils = utils.Utils(style_images_dir='style_images', models_dir='models', images_dir='images')
 
 st.markdown("""
 <style>
@@ -17,39 +19,56 @@ st.markdown("""
 
 st.title("Neural Style Transfer")
 
-
 st.sidebar.title("Settings")
 st.sidebar.header("Model")
 method = st.sidebar.radio('Select an option', options=['Specific', 'Arbitrary'])
 
 if method == 'Specific':
     style_model_name = st.sidebar.selectbox("Choose the style model: ", utils.formated_names(utils.models))
-else:
-    style_model_name = 'magenta_arbitrary-image-stylization-v1-256_2'
+    model = utils.get_model_from_name(style_model_name)
+    style_image = utils.get_image_from_name(style_model_name, style=True)
 
-style_model = utils.get_model_from_name(style_model_name)
+    if st.sidebar.checkbox('Upload'):
+        content_file = st.sidebar.file_uploader("Upload a Content Image", type=["png", "jpg", "jpeg"])
 
-if st.sidebar.checkbox('Upload'):
-    content_file = st.sidebar.file_uploader("Upload a Content Image", type=["png", "jpg", "jpeg"])
+        if content_file is not None:
+            content = utils.get_image_from_file(content_file)
+        else:
+            st.warning("Upload an image")
+            st.stop()
 
-    if content_file is not None:
-        content = utils.get_image_from_file(content_file)
     else:
-        st.warning("Upload an image")
+        st.sidebar.image(style_image, width=300)
+        content_name = st.sidebar.selectbox("Choose a Content Image", utils.formated_names(utils.images))
+        content = utils.get_image_from_name(content_name)
+    
+    style = None
+
+else:
+    model = hub.load('https://tfhub.dev/google/magenta/arbitrary-image-stylization-v1-256/1')
+
+    content_file = st.sidebar.file_uploader("Upload a Content Image", type=["png", "jpg", "jpeg"])
+    style_file = st.sidebar.file_uploader("Upload a Style Image", type=["png", "jpg", "jpeg"])
+
+    if content_file is not None and style_file is not None:
+            content = utils.get_image_from_file(content_file)
+            style = utils.get_image_from_file(style_file)
+    else:
+        st.warning("Upload content and style images")
         st.stop()
 
-else:
-    content_name = st.sidebar.selectbox("Choose a Content Image", utils.formated_names(utils.images))
-    content = utils.get_image_from_name(content_name)
-
-WIDTH = st.sidebar.select_slider('RESIZE', list(range(150, 501, 50)), value=300)
+WIDTH = st.sidebar.select_slider('RESIZE', list(range(150, 1001, 50)), value=300)
 content = cv2.resize(content, (WIDTH, WIDTH))
 
 st.sidebar.image(content, width=300, channels='RGB')
 
-
 # apply style transfer
-#result = apply_style_transfer(content, style_model)
+result = utils.stylize(content, model, style, method)
 
-#show result
-#st.image(result, channels='RGB', clamp=True)
+if method == 'Specific':
+    result = cv2.cvtColor(result, cv2.COLOR_BGR2RGB)
+    result = result.astype('long')
+
+    st.image(result, clamp=True, width=700)
+else:
+    st.image(result.numpy(), clamp=True, width=700)
