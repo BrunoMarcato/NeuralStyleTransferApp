@@ -7,7 +7,7 @@ import utils
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-utils = utils.Utils(style_images_dir='style_images', models_dir='models', images_dir='images')
+utils = utils.Utils(style_images_dir='style_images', models_dir='models', images_dir='content_images')
 
 st.markdown("""
 <style>
@@ -27,6 +27,8 @@ if method == 'Specific':
     style_model_name = st.sidebar.selectbox("Choose the style model: ", utils.formated_names(utils.models))
     model = utils.get_model_from_name(style_model_name)
     style_image = utils.get_image_from_name(style_model_name, style=True)
+    
+    st.sidebar.image(style_image, width=300)
 
     if st.sidebar.checkbox('Upload'):
         content_file = st.sidebar.file_uploader("Upload a Content Image", type=["png", "jpg", "jpeg"])
@@ -38,14 +40,13 @@ if method == 'Specific':
             st.stop()
 
     else:
-        st.sidebar.image(style_image, width=300)
         content_name = st.sidebar.selectbox("Choose a Content Image", utils.formated_names(utils.images))
         content = utils.get_image_from_name(content_name)
     
     style = None
 
 else:
-    model = hub.load('https://tfhub.dev/google/magenta/arbitrary-image-stylization-v1-256/1')
+    model = hub.load('https://kaggle.com/models/google/arbitrary-image-stylization-v1/frameworks/TensorFlow1/variations/256/versions/1')
 
     content_file = st.sidebar.file_uploader("Upload a Content Image", type=["png", "jpg", "jpeg"])
     style_file = st.sidebar.file_uploader("Upload a Style Image", type=["png", "jpg", "jpeg"])
@@ -67,7 +68,8 @@ result = utils.stylize(content, model, style, method)
 
 if method == 'Specific':
     result = cv2.cvtColor(result, cv2.COLOR_BGR2RGB)
-    result = result.astype('long')
+    if type(model) != cv2.dnn.Net:
+        result = result.astype('long')
 
     st.image(result, clamp=True, width=700)
 else:
