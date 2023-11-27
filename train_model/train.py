@@ -1,134 +1,173 @@
 import torch
-from torch.optim import Adam
-from torch.utils.tensorboard import SummaryWriter
-import albumentations as A
-from albumentations.pytorch import ToTensorV2
-
-from loss_net import LossNet
-from transformer_net import TransformerNet
-from dataset import train_dataloader
-
+import torch.nn as nn
+import torch.optim as optim
+from torchvision import datasets, transforms
+import random
 import numpy as np
-
 import time
-import os
 
-import utils.utils as utils
+from torch.utils.tensorboard import SummaryWriter
 
-def train(train_image_dir, 
-          style_image_dir,
-          style_image_name,
-          batch_size = 1, 
-          num_epochs = 2, 
-          learning_rate = 0.001,
-          content_weight = 1,
-          style_weight = 4e5,
-          tv_weight = 0,
-          log = True,
-          img_log_freq = 100,
-          console_log_freq = 1,
-          checkpoint_freq = 2000):
-    
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu") #device to run
+from vgg import VGG16
+from transformer import TransformerNetwork
+import utils
+
+# GLOBAL SETTINGS
+TRAIN_IMAGE_SIZE = 256
+DATASET_PATH = "data"
+NUM_EPOCHS = 1
+STYLE_IMAGE_PATH = "style_images/style_portugal.png"
+BATCH_SIZE = 8
+CONTENT_WEIGHT = 10
+STYLE_WEIGHT = 50
+ADAM_LR = 0.001
+SAVE_MODEL_PATH = "models/"
+SAVE_IMAGE_PATH = "images/out/"
+SAVE_MODEL_AND_IMAGE_EVERY = 100
+LOG_EVERY = 1
+SEED = 35
+PLOT_LOSS = 1
+
+def train():
     tb = SummaryWriter() #to log
-    u = utils.Utils(models_dir="models", images_dir="images") #utils functions
 
-    #data preparation
-    transform_list = A.Compose([A.Resize(height = 256, width = 256),
-                    A.CenterCrop(height = 256, width = 256),
-                    A.ToFloat(),
-                    ToTensorV2()])
-    
-    train_loader = train_dataloader(train_image_dir = train_image_dir, train_transforms = transform_list, batch_size = batch_size, num_workers = 4)
+    # Seeds
+    torch.manual_seed(SEED)
+    torch.cuda.manual_seed(SEED)
+    np.random.seed(SEED)
+    random.seed(SEED)
 
-    #models preparation
-    transformer_net = TransformerNet().train().to(device)
-    loss_net = LossNet(requires_grad=False).to(device)
+    # Device
+    device = ("cuda" if torch.cuda.is_available() else "cpu")
 
-    #optimizer
-    opt = Adam(transformer_net.parameters(), lr = learning_rate)
+    # Dataset and Dataloader
+    transform = transforms.Compose([
+        transforms.Resize(TRAIN_IMAGE_SIZE),
+        transforms.CenterCrop(TRAIN_IMAGE_SIZE),
+        transforms.ToTensor(),
+        transforms.Lambda(lambda x: x.mul(255))
+    ])
+    train_dataset = datasets.ImageFolder(DATASET_PATH, transform=transform)
+    train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
 
-    #get style image representation
-    style_img = u.preprocess_img(os.path.join(style_image_dir,style_image_name), device = device, batch_size = batch_size)
-    
-    target_style_features = loss_net(style_img)
+    # Load networks
+    transformer_net = TransformerNetwork().to(device)
+    VGG = VGG16().to(device)
 
-    target_style_representation = [utils.gram_matrix(feature) for feature in target_style_features]
+    # Get Style Features
+    imagenet_neg_mean = torch.tensor([-103.939, -116.779, -123.68], dtype=torch.float32).reshape(1,3,1,1).to(device)
+    style_image = utils.load_image(STYLE_IMAGE_PATH)
+    style_tensor = utils.itot(style_image).to(device)
+    style_tensor = style_tensor.add(imagenet_neg_mean)
+    _, C, H, W = style_tensor.shape
+    style_features = VGG(style_tensor.expand([BATCH_SIZE, C, H, W]))
+    style_gram = {}
+    for key, value in style_features.items():
+        style_gram[key] = utils.gram(value)
 
-    tb_content_loss, tb_style_loss, tb_tv_loss = [0., 0., 0.] #to log
+    # Optimizer settings
+    optimizer = optim.Adam(transformer_net.parameters(), lr=ADAM_LR)
 
-    #training loop
-    t = time.time()
-    for epoch in range(num_epochs):
-        print(f'\nEPOCH: {epoch+1}\n')
-        for i, content_batch in enumerate(train_loader):
-            content_batch.to(device)
-            style_batch = transformer_net(content_batch)
+    # Loss trackers
+    content_loss_history = []
+    style_loss_history = []
+    total_loss_history = []
+    batch_content_loss_sum = 0
+    batch_style_loss_sum = 0
+    batch_total_loss_sum = 0
 
-            content_batch_features = loss_net(content_batch)
-            style_batch_features = loss_net(style_batch)
+    # Optimization/Training Loop
+    batch_count = 1
+    start_time = time.time()
+    for epoch in range(NUM_EPOCHS):
+        print("========Epoch {}/{}========".format(epoch+1, NUM_EPOCHS))
+        for i, (content_batch, _) in enumerate(train_loader):
+            # Get current batch size in case of odd batch sizes
+            curr_batch_size = content_batch.shape[0]
 
-            #content representation and content loss
-            target_content_representation = content_batch_features.relu2_2
-            content_representation = style_batch_features.relu2_2
-            content_loss = content_weight * torch.nn.MSELoss(reduction='mean')(target_content_representation, content_representation)
+            # Free-up unneeded cuda memory
+            torch.cuda.empty_cache()
 
-            #style representation and style loss
-            style_loss = 0.0
-            style_representation = [utils.gram_matrix(x) for x in style_batch_features]
-            for gram_gt, gram_hat in zip(target_style_representation, style_representation):
-                style_loss += torch.nn.MSELoss(reduction='mean')(gram_gt, gram_hat)
-            
-            style_loss /= len(target_style_representation)
-            style_loss *= style_weight
+            # Zero-out Gradients
+            optimizer.zero_grad()
 
-            #total variation loss (force image smoothness)
-            tv_loss = tv_weight*utils.total_variation(style_batch)
+            # Generate images and get features
+            content_batch = content_batch[:,[2,1,0]].to(device)
+            generated_batch = transformer_net(content_batch)
+            content_features = VGG(content_batch.add(imagenet_neg_mean))
+            generated_features = VGG(generated_batch.add(imagenet_neg_mean))
 
-            #sum loss
-            total_loss = content_loss + style_loss + tv_loss
+            # Content Loss
+            MSELoss = nn.MSELoss().to(device)
+            content_loss = CONTENT_WEIGHT * MSELoss(generated_features['relu2_2'], content_features['relu2_2'])            
+            batch_content_loss_sum += content_loss
 
-            #backprop
+            # Style Loss
+            style_loss = 0
+            for key, value in generated_features.items():
+                s_loss = MSELoss(utils.gram(value), style_gram[key][:curr_batch_size])
+                style_loss += s_loss
+            style_loss *= STYLE_WEIGHT
+            batch_style_loss_sum += style_loss.item()
+
+            # Total Loss
+            total_loss = content_loss + style_loss
+            batch_total_loss_sum += total_loss.item()
+
+            # Backprop and Weight Update
             total_loss.backward()
-            opt.step()
-            opt.zero_grad()
+            optimizer.step()
 
-            #logging
-            tb_content_loss += content_loss.item()
-            tb_style_loss += style_loss.item()
-            tb_tv_loss += tv_loss.item()
+            # Save Model and Print Losses
+            if (((batch_count-1)%LOG_EVERY == 0) or (batch_count==NUM_EPOCHS*len(train_loader))):
+                tb.add_scalar('Loss/Content', batch_content_loss_sum/batch_count, len(train_loader)*epoch + i+1)
+                tb.add_scalar('Loss/Style', batch_style_loss_sum/batch_count, len(train_loader)*epoch + i+1)
 
-            if log:
-                tb.add_scalar('Loss/Content', content_loss.item(), len(train_loader)*epoch + i+1)
-                tb.add_scalar('Loss/Style', style_loss.item(), len(train_loader)*epoch + i+1)
-                tb.add_scalar('Loss/Total-Variation', tv_loss.item(), len(train_loader)*epoch + i+1)
+                # Print Losses
+                print("========Iteration {}/{}========".format(batch_count, NUM_EPOCHS*len(train_loader)))
+                print("\tContent Loss:\t{:.2f}".format(batch_content_loss_sum/batch_count))
+                print("\tStyle Loss:\t{:.2f}".format(batch_style_loss_sum/batch_count))
+                print("\tTotal Loss:\t{:.2f}".format(batch_total_loss_sum/batch_count))
+                print("Time elapsed:\t{} seconds".format(time.time()-start_time))
+                
+            if (((batch_count-1)%SAVE_MODEL_AND_IMAGE_EVERY == 0) or (batch_count==NUM_EPOCHS*len(train_loader))):
+                # Save Model
+                checkpoint_path = SAVE_MODEL_PATH + "checkpoint_" + str(batch_count-1) + ".pth"
+                torch.save(transformer_net.state_dict(), checkpoint_path)
+                print("Saved transformer network checkpoint file at {}".format(checkpoint_path))
 
-                if i % img_log_freq == 0:
-                    stylized =  utils.post_process_image(style_batch[0].detach().to('cpu').numpy())
-                    stylized = np.moveaxis(stylized, 2, 0) #channel first
-                    tb.add_image('stylized_img', stylized, len(train_loader) * epoch + i + 1)
+                # Save sample generated image
+                sample_tensor = generated_batch[0].clone().detach().unsqueeze(dim=0)
+                sample_image = utils.ttoi(sample_tensor.clone().detach())
+                sample_image_path = SAVE_IMAGE_PATH + "sample0_" + str(batch_count-1) + ".png"
+                utils.saveimg(sample_image, sample_image_path)
+                print("Saved sample tranformed image at {}".format(sample_image_path))
 
-            if console_log_freq is not None and i % console_log_freq == 0:
-                print(f'time elapsed={(time.time()-t)/60:.2f}[min]|epoch={epoch + 1}|batch=[{i + 1}/{len(train_loader)}]|c-loss={tb_content_loss / console_log_freq}|s-loss={tb_style_loss / console_log_freq}|tv-loss={tb_tv_loss / console_log_freq}|total loss={(tb_content_loss + tb_style_loss + tb_tv_loss) / console_log_freq}')
-                tb_content_loss, tb_style_loss, tb_tv_loss = [0., 0., 0.]
+            # Iterate Batch Counter
+            batch_count+=1
 
-            if checkpoint_freq is not None and (i + 1) % checkpoint_freq == 0:
-                training_state = {
-                    "content_weight": content_weight,
-                    "style_weight": style_weight,
-                    "tv_weight": tv_weight,
-                    "num_epochs": num_epochs,
-                    "state_dict": transformer_net.state_dict(),
-                    "optimizer_state": opt.state_dict()
-                }
+    stop_time = time.time()
+    # Print loss histories
+    print("Done Training the Transformer Network!")
+    print("Training Time: {} seconds".format(stop_time-start_time))
+    print("========Content Loss========")
+    print(content_loss_history) 
+    print("========Style Loss========")
+    print(style_loss_history) 
+    print("========Total Loss========")
+    print(total_loss_history) 
 
-                ckpt_model_name = f"ckpt_style_{style_image_name.split('.')[0]}_cw_{str(content_weight)}_sw_{str(style_weight)}_tw_{str(tv_weight)}_epoch_{epoch}_batch_{i}.pth"
-                torch.save(training_state, os.path.join('models', ckpt_model_name))
+    # Save transformer network weights
+    transformer_net.eval()
+    transformer_net.cpu()
+    final_path = SAVE_MODEL_PATH + "transformer_weight.pth"
+    print(f"Saving transformer network weights at {final_path}")
+    torch.save(transformer_net.state_dict(), final_path)
+    print("Done saving final model")
+
+    # Plot Loss Histories
+    if (PLOT_LOSS):
+        utils.plot_loss_hist(content_loss_history, style_loss_history, total_loss_history)
 
 if __name__ == '__main__':
-    train(train_image_dir="data/mscoco/train2014", 
-          style_image_dir="style_images", 
-          style_image_name="starry_night.jpeg",
-          batch_size=4, 
-          num_epochs=2,
-          tv_weight=0.1)
+    train()
