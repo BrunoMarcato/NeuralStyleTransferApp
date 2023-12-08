@@ -46,7 +46,7 @@ if method == 'Specific':
     style = None
 
 else:
-    model = hub.load('https://kaggle.com/models/google/arbitrary-image-stylization-v1/frameworks/TensorFlow1/variations/256/versions/1')
+    model = hub.load('https://tfhub.dev/google/magenta/arbitrary-image-stylization-v1-256/2')
 
     content_file = st.sidebar.file_uploader("Upload a Content Image", type=["png", "jpg", "jpeg"])
     style_file = st.sidebar.file_uploader("Upload a Style Image", type=["png", "jpg", "jpeg"])
