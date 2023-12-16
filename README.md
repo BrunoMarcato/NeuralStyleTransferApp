@@ -6,10 +6,6 @@ The App can be accessed via the following link:
 
 ---
 
-Paper about the project:
-
----
-
 To install dependencies, run the command:
 
 `pip install -r requirements.txt`
