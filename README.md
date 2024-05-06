@@ -6,6 +6,10 @@ The App can be accessed via the following link:
 
 ---
 
+Paper for this project can be acessed in [here](SI2_Paper_StyleTransfer.pdf)
+
+---
+
 To install dependencies, run the command:
 
 `pip install -r requirements.txt`
